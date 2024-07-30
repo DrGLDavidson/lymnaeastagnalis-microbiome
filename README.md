@@ -1,0 +1,1 @@
+This repository includes raw data and R code from the publication Davidson GL, Cienfuegos IA, Dalesman S. Antibiotic-altered gut microbiota explain host memory plasticity and disrupt pace-of-life covariation for an aquatic snail. ISME J. 2024 Jan 8;18(1):wrae078. doi: 10.1093/ismejo/wrae078. PMID: 38811063; PMCID: PMC11136587.

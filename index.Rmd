@@ -1,0 +1,670 @@
+---
+title: "Antibiotic-altered gut microbiota explain plasticity in host memory and the covariation of pace-of-life traits in an aquatic snail"
+author: ""
+date: "2023-10-09"
+output: html_document
+---
+```{r echo=T, results='hide', error=FALSE, warning=FALSE, message=FALSE}
+#load the following packages
+library(vegan)  
+library(tidyverse)
+library(phyloseq) 
+library(ggplot2)
+library(dplyr)
+library(lme4)
+library(lmerTest)
+library(metagenomeSeq)
+setwd("F:/RWorkspace/Snail microbiome/snailMicrobiome Publication data")
+
+taxonomy <- read.table("rdp-classified_GD_taxTable.txt")  
+metadata <- read.table("snail_metadata.txt", header=TRUE, row.names = "row.names") #before scaled data saved and alpha diversity
+otus <- read.table("otu-table-centroids-iddef0-400bp.txt")  
+
+# Edit metadata for downstream analyses: invert the sign (-/+) for biteRateChange 
+# (more intuitive to interpret where higher values = better memory) 
+
+
+names(metadata)[names(metadata) == "biteRateChange"] <- "rawbiteRateChange"  
+metadata$biteRateChange = metadata$rawbiteRateChange*(-1)
+
+
+
+
+
+##scale variables
+
+metadata$scaledThig<-scale(metadata$Thigmotaxis)
+metadata$scaledSpeed<-scale(metadata$Speed)
+metadata$scaledBiteRate<-scale(metadata$biteRateChange)
+metadata$scaledmetRate<-scale(metadata$metabolicRate)
+names(metadata)
+
+#phyloseq format
+OTU = otu_table(otus, taxa_are_rows = TRUE)
+TAX = tax_table(as.matrix(taxonomy))  
+MET = sample_data(metadata)
+
+phyformat = phyloseq(OTU, TAX, MET)
+
+# metadata with non-sequenced individuals and DMSO
+
+#metadata<-read.csv("metadata_DMSO.csv",header=TRUE)
+
+```
+## filtering steps
+```{r}
+class(OTU) <- "matrix"
+tab <- t(OTU)
+rarecurve(tab, step=50, cex=0.5, label = FALSE, xlim=c(0, 5000), ylim=c(0,600))
+
+#a read cut off of 1000 is sufficient and conservative. 
+
+snailPhyloFilt <- prune_samples(sample_sums(phyformat)>=1000, phyformat) 
+# sample 30 has been dropped
+# if using metadata object downstream, must remove sample 30
+
+#remove cyanobacteria 
+filterPhyla = c("Cyanobacteria/Chloroplast")               #, "","","","")
+snailPhyloFilt <- subset_taxa(snailPhyloFilt, !Phylum %in% filterPhyla)
+
+#remove taxa w/ <0.005\% total abundance of total abundance of whole dataset recommeded by Bokulich
+
+# taxa total abundance
+taxa.abundances <- get_sample(snailPhyloFilt)
+# dataset total abundance
+total.abundance <- apply(taxa.abundances, 1,sum)
+# combine
+tt.abundances <- cbind(taxa.abundances,total.abundance)
+cutoff <- sum(total.abundance)*0.00005
+keep <- total.abundance>cutoff
+snailPhyloFilt2 <- prune_taxa(keep,snailPhyloFilt)  
+
+reads<-sample_sums(snailPhyloFilt2)  
+reads<-as.data.frame(reads)
+sum(reads$reads)  
+mean(reads$reads)  
+min(reads$reads) 
+max(reads$reads) 
+
+# NORMALISATION Transform OTU counts, using Cumulative sum scaling from metagenomeseq package.
+# convert phylo obj to metagenomeSeq object
+SnailMGS <- phyloseq_to_metagenomeSeq(snailPhyloFilt2)
+
+# normalization
+p <- cumNormStatFast(SnailMGS)
+p
+SnailMGS <- cumNorm(SnailMGS, p =p)
+
+#returns normalized factors for each sample
+normFactors(SnailMGS)
+
+# To export normalized count matrix
+CSS.count.matrix.snail <- MRcounts(SnailMGS, norm = T)
+
+# reintegrate w/ phyloseq
+CSS.otu.snail <- otu_table(CSS.count.matrix.snail, taxa_are_rows = TRUE)
+snailPhyloCSS <- merge_phyloseq(CSS.otu.snail,snailPhyloFilt2)
+
+# snailPhyloCSS is normalised for beta diversity analysis
+# snailPhyloFilt and snailPhyloFilt2 is not normalised for alpha diversity analysis and relative abundance analysis
+
+```
+## preparing family and phylum for relative abundance graphs
+```{r eval=FALSE}
+# collapse phyloseq object down to only contain Phyla level info ##
+snailPhyloFilt2 <-  tax_glom(snailPhyloFilt2, "Phylum", NArm = TRUE) 
+
+## transform to relative abundances 
+
+snailPhyloRA <- transform_sample_counts(snailPhyloFilt2, function(x){x / sum(x)})
+# special phyloseq psmelt function retuns dataframe w/ otu abundances, taxa names and sample data
+motsnail <- psmelt(snailPhyloRA)
+write.csv(motsnail, file = "otuAbundances_Taxa_Sample_Snail.csv")
+
+phyloGlom = tax_glom(snailPhyloFilt2, "Phylum")
+glomTax = tax_table(phyloGlom)[,"Phylum"]
+glomOTU = otu_table(phyloGlom)
+glomTable = merge(glomOTU,glomTax,by=0,all=TRUE)
+rownames(glomTable) = glomTable[,"Phylum"]
+glomTable$Row.names = NULL
+glomTable$Phylum = NULL
+
+glomTable2 = glomTable / rep(colSums(glomTable), each = nrow(glomTable)) ###percentages
+glomTable3 = as.data.frame(t(glomTable2))
+write.csv(glomTable3, file = "RA_Phylum.csv")
+
+SnailPhylumRA2023<-merge(glomTable3, metadata, by = 0) 
+write.csv(SnailPhylumRA2023, file = "metadata_PhylumRA.csv")
+PhylumRA<-read.csv(file="metadata_PhylumRA.csv", header=TRUE)
+
+# currently each column is a phylum with its abundance as values in cells. I want a column named Phylum and a column named Abundance
+names(PhylumRA)
+SnailPhylumRAGather<-gather(PhylumRA, 'Spirochaetes', 'Armatimonadetes', 'Woesearchaeota', 'Bacteroidetes' , 'Proteobacteria', 'Firmicutes',
+       'Candidatus_Saccharibacteria', 'Planctomycetes' , 'Acidobacteria' , 'Verrucomicrobia' , 'Tenericutes',  'candidate_division_WPS_2',
+       'Actinobacteria','Chlamydiae', key="Phylum", value = "Abundance")
+
+snailMeans <- summarySE(SnailPhylumRAGather, measurevar="Abundance", groupvars=c("treatmentOrder","Phylum"))
+write.csv(snailMeans, file="RAPhylumMeans.csv")
+
+# same again but at Family level 
+phyloGlom = tax_glom(snailPhyloFilt2, "Family")
+glomTax = tax_table(phyloGlom)[,"Family"]
+glomOTU = otu_table(phyloGlom)
+glomTable = merge(glomOTU,glomTax,by=0,all=TRUE)
+# unknown and unclassified are duplicates, so need to edit this
+
+Unk<-glomTable%>%
+  filter(Family == "unknown" | Family == "unclassified")%>%
+  select(Row.names, Family)
+
+taxonomy<- rownames_to_column(taxonomy, "Row.names")
+unkOTU<-Unk$Row.names
+unkOTUTax<-taxonomy%>%
+  filter(Row.names == "otunum120" | Row.names == "otunum163"| Row.names == "otunum281"| Row.names == "otunum286"| Row.names == "otunum290"| Row.names == "otunum334") 
+unkOTUTax<-unkOTUTax%>%
+  select(Row.names, Phylum)
+phylum<-c("Proteobacteria_1"       ,     "Bacteroidetes"          ,     "Proteobacteria_2"           , "Candidatus_Saccharibacteria" ,"candidate_division_WPS-2"  , 
+ "Woesearchaeota"  )
+
+unkOTUTax<-cbind(unkOTUTax,phylum)
+
+unkOTUTax$Phylum<-str_replace(unkOTUTax$Phylum,'Proteobacteria', 'Proteobacteria_1')
+
+glomTable$Family <- str_replace_all(glomTable$Family ,'unknown','unclassified_')
+glomTable$Family <- str_replace_all(glomTable$Family ,'unclassified','unclassified_')
+
+glomTable <- merge(glomTable, unkOTUTax, by = "Row.names", all = TRUE)
+glomTable <- replace(glomTable, is.na(glomTable), "")
+glomTable<-unite(glomTable, col='family', c('Family', 'phylum'), sep='', remove=FALSE)
+#there is still a duplicate 
+library(stringr)
+#now there are no duplicates and should use column family, not Family
+rownames(glomTable) = glomTable[,"family"]   
+glomTable$Row.names = NULL
+glomTable$family = NULL
+glomTable<-subset(glomTable, select=-c(Family,Phylum,phylum))
+glomTable2 = glomTable / rep(colSums(glomTable), each = nrow(glomTable)) 
+glomTable3 = as.data.frame(t(glomTable2))
+write.csv(glomTable3, file = "RA_Family.csv")
+SnailFamilyRA2023<-merge(glomTable3, metadata, by = 0) 
+write.csv(SnailFamilyRA2023, file = "metadata_FamilyRA.csv")
+
+family<-rownames(glomTable2)
+uniqueFamily<-unique(family)
+```
+
+
+## Beta Diversity
+```{r echo=T, results='hide', error=FALSE, warning=FALSE, message=FALSE}
+library(compositions)
+```
+
+```{r error=FALSE, warning=FALSE, message=FALSE}
+# calc aitchison distance
+
+clr.asvTable <- compositions::clr(snailPhyloCSS@otu_table)
+
+#transform so columns are rows and vice versa
+clr<-as.data.frame(clr.asvTable)
+clr = t(clr) 
+
+aitchison.distances <- vegan::vegdist(clr, method = "euclid", na.rm=TRUE)
+AD<-as.matrix(aitchison.distances) 
+
+# PERMUTATION TEST TO SEE IF VARIANCES DIFFER BY GROUPS
+ADTreat<-vegan::betadisper(aitchison.distances, snailPhyloCSS@sam_data$treatmentOrder)
+permutest(ADTreat, pairwise=FALSE, permutations=1000)
+
+# Aitchinson Adonis by scaled continuous terms. 
+
+adonis2(aitchison.distances~snailPhyloCSS@sam_data$treatmentOrder+snailPhyloCSS@sam_data$scaledBiteRate+snailPhyloCSS@sam_data$scaledSpeed + snailPhyloCSS@sam_data$scaledThig+snailPhyloCSS@sam_data$scaledmetRate, method = "euclidian", by= "terms")
+
+
+#jaccard distance 
+ 
+ otu_table<-snailPhyloCSS@otu_table
+
+otu_table = t(otu_table) 
+ jaccard <- vegdist(otu_table, method = "jaccard", binary = TRUE)
+
+ 
+# PERMUTATION TEST TO SEE IF VARIANCES DIFFER BY GROUPS
+JTreat<-vegan::betadisper(jaccard, snailPhyloCSS@sam_data$treatmentOrder)
+permutest(JTreat, pairwise=FALSE, permutations=1000)
+
+adonis2(jaccard~snailPhyloCSS@sam_data$treatmentOrder+snailPhyloCSS@sam_data$scaledBiteRate+snailPhyloCSS@sam_data$scaledSpeed + snailPhyloCSS@sam_data$scaledThig+snailPhyloCSS@sam_data$scaledmetRate, method = "jaccard", by= "terms")
+
+
+```
+## Alpha diversity
+```{r}
+
+alphaDiversitySnails<-estimate_richness(snailPhyloFilt, split = TRUE, measures = NULL) 
+
+alphaDiversitySnails<-alphaDiversitySnails%>%
+  select(Chao1, Shannon, Observed)
+
+# add a-div dataframe to metadata df
+metadataAlphaDiversity <- merge(metadata, alphaDiversitySnails, by="row.names")
+
+names(metadataAlphaDiversity)
+
+write.table(metadataAlphaDiversity, file = "metadata_alphaDiversity.txt",sep="\t",row.names=FALSE) 
+
+```
+
+## clear environment and load packages and metadata for GLMM and pearsons corr tests
+```{r echo=T, results='hide', error=FALSE, warning=FALSE, message=FALSE}
+rm(list = ls(all.names = TRUE))
+library(usdm)
+library(MuMIn)
+metadataFull<-read.csv(file="metadata_full.csv",header=TRUE)
+```
+## Principal component and colinearity tests
+```{r}
+
+#Speed and thigmotaxis are measures of exploration  in the same test - candidate for principle component of these two traits? 
+
+names(metadataFull)[names(metadataFull) == "biteRateChange"] <- "rawbiteRateChange"  
+metadataFull$biteRateChange = metadataFull$rawbiteRateChange*(-1)
+
+##scale variables
+
+metadataFull$scaledThig<-scale(metadataFull$Thigmotaxis)
+metadataFull$scaledSpeed<-scale(metadataFull$Speed)
+metadataFull$scaledBiteRate<-scale(metadataFull$biteRateChange)
+metadataFull$scaledmetRate<-scale(metadataFull$metabolicRate)
+names(metadataFull)
+
+
+PCA<-data.frame((metadataFull$Thigmotaxis), (metadataFull$Speed))
+pcaout <- prcomp(PCA, center = TRUE, scale = TRUE )
+
+pcaout<-prcomp(PCA)
+
+eigen<-pcaout$sdev^2
+eigen
+
+#below 1 eigen values therefore no justification to analyse speed and thigmotaxis as a principle component
+
+# check if variables are colinear before including all in GLMM: 
+
+df<-data.frame(metadataFull$scaledmetRate, metadataFull$scaledThig, metadataFull$scaledSpeed, metadataFull$scaledBiteRate)
+vif(df)
+
+# all around 1 therefore no colinearity, can include in same model
+
+# clean up environment
+rm(PCA, pcaout, df, eigen, control)
+```
+# Correlation tests with bootstrap
+```{r eval=FALSE}
+# credit to bootstrapping tutorial https://www.datawim.com/post/bootstrapping-correlation-coefficients-in-r/
+library(dplyr)
+library(tidyverse)
+library(tidymodels)
+library(rstatix)
+library(ggpubr)
+
+metadataFull<-read.csv(file="metadata_full.csv",header=TRUE)
+names(metadataFull)[names(metadataFull) == "biteRateChange"] <- "rawbiteRateChange"  
+metadataFull$biteRateChange = metadataFull$rawbiteRateChange*(-1)
+
+##thigmotaxis metabolic rate
+
+point <- metadataFull %>%
+  group_by(treatmentOrder) %>% 
+  cor_test(Thigmotaxis, metabolicRate, method = "pearson")
+
+point
+
+boot_corr <- metadataFull %>% 
+  nest(data = -c(treatmentOrder)) %>% # grouping the treatments
+  mutate(boots = map(data, ~bootstraps(.x, times = 2000, apparent = FALSE))) %>% # defining bootstraps
+  unnest(boots) %>% # un-nesting bootsrapped data lists
+  mutate(correlations = map(splits, ~cor_test(Thigmotaxis, metabolicRate, data = analysis((.))))) # performing correlation
+
+corr <- boot_corr %>% 
+  unnest(correlations) %>% # unnesting tidied data frames
+  select(-data, -splits, -id)
+
+corr
+
+#confidence intervals from bootstrap
+CI <- corr %>%
+  group_by(treatmentOrder) %>%
+        summarise(lwr_CI = quantile(cor, 0.025),
+                  .estimate = median(cor),
+                  upr_CI = quantile(cor, 0.975))
+
+##speed metabolic rate
+
+point1 <- metadataFull %>%
+  group_by(treatmentOrder) %>% 
+  cor_test(metabolicRate, Speed, method = "pearson")
+
+point1
+
+boot_corr <- metadataFull %>% 
+  nest(data = -c(treatmentOrder)) %>% # grouping the treatments
+  mutate(boots = map(data, ~bootstraps(.x, times = 2000, apparent = FALSE))) %>% # defining bootstraps
+  unnest(boots) %>% # un-nesting bootsrapped data lists
+  mutate(correlations = map(splits, ~cor_test(Speed, metabolicRate, data = analysis((.))))) # performing correlation
+
+corr <- boot_corr %>% 
+  unnest(correlations) %>% # unnesting tidied data frames
+  select(-data, -splits, -id)
+
+#confidence intervals from bootstrap
+CI_1 <- corr %>%
+  group_by(treatmentOrder) %>%
+        summarise(lwr_CI = quantile(cor, 0.025),
+                  .estimate = median(cor),
+                  upr_CI = quantile(cor, 0.975))
+
+##biteRate Thigmotaxis
+point2 <- metadataFull %>%
+  group_by(treatmentOrder) %>% 
+  cor_test(biteRateChange, Thigmotaxis, method = "pearson")
+
+point2
+
+boot_corr <- metadataFull %>% 
+  nest(data = -c(treatmentOrder)) %>% # grouping the treatments
+  mutate(boots = map(data, ~bootstraps(.x, times = 2000, apparent = FALSE))) %>% # defining bootstraps
+  unnest(boots) %>% # un-nesting bootsrapped data lists
+  mutate(correlations = map(splits, ~cor_test(biteRateChange, Thigmotaxis, data = analysis((.))))) # performing correlation
+
+corr <- boot_corr %>% 
+  unnest(correlations) %>% # unnesting tidied data frames
+  select(-data, -splits, -id)
+
+#confidence intervals from bootstrap
+CI_2 <- corr %>%
+  group_by(treatmentOrder) %>%
+        summarise(lwr_CI = quantile(cor, 0.025),
+                  .estimate = median(cor),
+                  upr_CI = quantile(cor, 0.975))
+
+##biteRate Speed
+point3 <- metadataFull %>%
+  group_by(treatmentOrder) %>% 
+  cor_test(biteRateChange, Speed, method = "pearson")
+
+point3
+
+boot_corr <- metadataFull %>% 
+  nest(data = -c(treatmentOrder)) %>% # grouping the treatments
+  mutate(boots = map(data, ~bootstraps(.x, times = 2000, apparent = FALSE))) %>% # defining bootstraps
+  unnest(boots) %>% # un-nesting bootsrapped data lists
+  mutate(correlations = map(splits, ~cor_test(biteRateChange, Speed, data = analysis((.))))) # performing correlation
+
+corr <- boot_corr %>% 
+  unnest(correlations) %>% # unnesting tidied data frames
+  select(-data, -splits, -id)
+
+#confidence intervals from bootstrap
+CI_3 <- corr %>%
+  group_by(treatmentOrder) %>%
+        summarise(lwr_CI = quantile(cor, 0.025),
+                  .estimate = median(cor),
+                  upr_CI = quantile(cor, 0.975))
+
+##biteRate metabolic rate
+point4 <- metadataFull %>%
+  group_by(treatmentOrder) %>% 
+  cor_test(biteRateChange, metabolicRate, method = "pearson")
+
+point4
+
+boot_corr <- metadataFull %>% 
+  nest(data = -c(treatmentOrder)) %>% # grouping the treatments
+  mutate(boots = map(data, ~bootstraps(.x, times = 2000, apparent = FALSE))) %>% # defining bootstraps
+  unnest(boots) %>% # un-nesting bootsrapped data lists
+  mutate(correlations = map(splits, ~cor_test(biteRateChange, metabolicRate, data = analysis((.))))) # performing correlation
+
+corr <- boot_corr %>% 
+  unnest(correlations) %>% # unnesting tidied data frames
+  select(-data, -splits, -id)
+
+#confidence intervals from bootstrap
+CI_4 <- corr %>%
+  group_by(treatmentOrder) %>%
+        summarise(lwr_CI = quantile(cor, 0.025),
+                  .estimate = median(cor),
+                  upr_CI = quantile(cor, 0.975))
+
+##Thigmotaxis Speed
+point5 <- metadataFull %>%
+  group_by(treatmentOrder) %>% 
+  cor_test(Thigmotaxis, Speed, method = "pearson")
+
+point5
+
+boot_corr <- metadataFull %>% 
+  nest(data = -c(treatmentOrder)) %>% # grouping the treatments
+  mutate(boots = map(data, ~bootstraps(.x, times = 2000, apparent = FALSE))) %>% # defining bootstraps
+  unnest(boots) %>% # un-nesting bootsrapped data lists
+  mutate(correlations = map(splits, ~cor_test(Thigmotaxis, Speed, data = analysis((.))))) # performing correlation
+
+corr <- boot_corr %>% 
+  unnest(correlations) %>% # unnesting tidied data frames
+  select(-data, -splits, -id)
+
+#confidence intervals from bootstrap
+CI_5 <- corr %>%
+  group_by(treatmentOrder) %>%
+        summarise(lwr_CI = quantile(cor, 0.025),
+                  .estimate = median(cor),
+                  upr_CI = quantile(cor, 0.975))
+
+
+pearsonsResults<-bind_rows(point, point5, point1, point2, point3, point4)
+write.csv(pearsonsResults, file = "pearsonsCorrelationResults.csv")
+
+
+```
+
+
+# GLMMs
+```{r}
+#treatments on behaviours
+
+
+
+model4<-lmer(metabolicRate~ treatment + (1|aquarium), data = metadataFull)
+summary(model4)
+model6<-lmer(biteRateChange~treatment+(1|aquarium), data = metadataFull)
+summary(model6)
+model7<-lmer(Thigmotaxis~treatment+(1|aquarium), data = metadataFull)
+summary(model7)
+model8<-lmer(Speed~treatment+(1|aquarium), data = metadataFull)
+summary(model8)
+
+
+#alpha diversity Shannon and Chao1
+
+alphaDiversitySnails <-read.table("metadata_alphaDiversity.txt", row.names="Row.names", header = TRUE) 
+
+# shannon
+model1<-lmer(Shannon~scaledSpeed*treatmentOrder + scaledThig*treatmentOrder + scaledmetRate*treatmentOrder+ scaledBiteRate*treatmentOrder +treatmentOrder+ (1|aquarium), data=alphaDiversitySnails, na.action=na.fail)
+summary(model1)
+
+dd<-dredge(model1, subset= ~treatmentOrder, evaluate=TRUE, rank=AICc) 
+dd
+ddAIC_S<-subset(dd, delta < 7)
+ddAIC_S
+get.models(ddAIC_S, subset=TRUE) 
+ddMAc<-model.avg(ddAIC_S, subset= delta <7)
+summary(ddMAc)
+rm(dd, ddAIC_S, ddMAc)
+
+# chao1
+
+model2<-lmer(Chao1~scaledSpeed*treatmentOrder + scaledThig*treatmentOrder + scaledmetRate*treatmentOrder+ scaledBiteRate*treatmentOrder +treatmentOrder+ (1|aquarium), data=alphaDiversitySnails, na.action=na.fail)
+summary(model2)
+
+model2<-lmer(Chao1~scaledSpeed + scaledThig + scaledmetRate+ scaledBiteRate +treatmentOrder+ (1|aquarium), data=alphaDiversitySnails, na.action=na.fail)
+summary(model2)
+
+dd<-dredge(model2, subset= ~treatmentOrder, evaluate=TRUE, rank=AICc) 
+dd
+ddAIC_C<-subset(dd, delta < 7)
+ddAIC_C
+get.models(ddAIC_C, subset=TRUE) 
+ddMAc<-model.avg(ddAIC_C, subset= delta <7)
+summary(ddMAc)
+
+
+# observed 
+
+model3<-lmer(Observed~scaledSpeed*treatmentOrder + scaledThig*treatmentOrder + scaledmetRate*treatmentOrder+ scaledBiteRate*treatmentOrder +treatmentOrder+ (1|aquarium), data=alphaDiversitySnails, na.action=na.fail)
+summary(model3)
+
+model3<-lmer(Observed~scaledSpeed + scaledThig + scaledmetRate+ scaledBiteRate +treatmentOrder+ (1|aquarium), data=alphaDiversitySnails, na.action=na.fail)
+summary(model3)
+
+dd<-dredge(model3, subset= ~treatmentOrder, evaluate=TRUE, rank=AICc) 
+dd
+ddAIC_C<-subset(dd, delta < 7)
+ddAIC_C
+get.models(ddAIC_C, subset=TRUE) 
+ddMAc<-model.avg(ddAIC_C, subset= delta <7)
+summary(ddMAc)
+rm(dd, ddAIC_C, ddMAc, model1, model2, model3)
+
+```
+## can carrot juice consumptions explain alpha diversity or treatment on palatability? 
+
+```{r}
+###Can alpha diversity increase be explained by consumption of carrot juice? 
+
+model1<-lmer(Shannon~Pretraining+ (1|aquarium), data=alphaDiversitySnails) 
+summary(model1)
+
+model2<-lmer(Shannon~Posttraining+ (1|aquarium), data=alphaDiversitySnails) 
+summary(model2)
+
+alphaDiversitySnails$Pretraining<-as.numeric(alphaDiversitySnails$Pretraining)
+alphaDiversitySnails$Posttraining<-as.numeric(alphaDiversitySnails$Posttraining)
+Alltraining2<-rowSums(alphaDiversitySnails[ , c("Pretraining", "Posttraining")]) 
+
+alphaDiversitySnails<-cbind(alphaDiversitySnails, Alltraining2)
+
+model3<-lmer(Shannon~Alltraining2+ (1|aquarium), data=alphaDiversitySnails) ###t = 0.457    p =0.649 
+summary(model3)
+
+# observed 
+
+model4<-lmer(Observed~Pretraining+ (1|aquarium), data=alphaDiversitySnails) 
+summary(model4)
+
+model5<-lmer(Observed~Posttraining+ (1|aquarium), data=alphaDiversitySnails) 
+summary(model5)
+
+model6<-lmer(Observed~Alltraining2+ (1|aquarium), data=alphaDiversitySnails) ###t = 0.457    p =0.649 
+summary(model6)
+
+##does treatment affect willingness to consume carrot juice? 
+model3b<-lmer(Pretraining~treatmentOrder+ (1|aquarium), data=alphaDiversitySnails) ###NO
+summary(model3b)
+```
+## DMSO effect on behaviour
+
+```{r}
+metadataDMSO<-read.csv(file="metadata_DMSO_control.csv",header=TRUE)
+
+model1<-lmer(metabolicRate~ treatmentOrder + (1|aquarium), data = metadataDMSO)
+summary(model1)
+
+model2<-lmer(biteRateChange~ treatmentOrder + (1|aquarium), data = metadataDMSO)
+summary(model2)
+
+model3<-lmer(Speed~ treatmentOrder + (1|aquarium), data = metadataDMSO)
+summary(model3)
+
+model4<-lmer(Thigmotaxis~ treatmentOrder + (1|aquarium), data = metadataDMSO)
+summary(model4)
+
+
+```
+
+
+
+## Differential Abundance at OTU level
+```{r eval=FALSE}
+rm(list = ls(all.names = TRUE))
+library(Maaslin2)
+metadata <-read.table("metadata_alphaDiversity.txt", row.names="Row.names", header = TRUE)  ###this has the scaled data for analyses, example in beta diversity
+otus <- read.table("otu-table-centroids-iddef0-400bp.txt")  
+
+# OTU differential abundance analysis
+
+fit_data = Maaslin2(
+  input_data = otus, 
+  input_metadata = metadata, 
+  output = "Maaslin2_output_OTUs_AllFixedTerms", 
+  fixed_effects = c("treatmentOrder", "scaledBiteRate", "scaledThig", "scaledSpeed", "scaledmetRate"),
+  random_effects = c("aquarium"),
+  reference = c("treatmentOrder,control"),
+  plot_scatter = FALSE)
+
+
+KO <- read.table(file='KO_pred_metagenome_unstrat.tsv', header=TRUE)
+#Assigning row names from 1st column 
+rownames(KO) <- KO[,1] 
+KO = subset(KO, select = -function. )
+KO[] <- lapply(KO, as.integer)
+PA <- read.table(file='path_abun_unstrat.tsv', header=TRUE)
+#Assigning row names from 1st column 
+rownames(PA) <- PA[,1] 
+##remove the duplicate column
+PA = subset(PA, select = -pathway )
+##make values intergers
+PA[] <- lapply(PA, as.integer) 
+
+#this metadata file has the full fastq sample names (not the shortened names) that were used in the picrust analysis. 
+meta<-read.table(file="metadata_picrust.txt", header=TRUE, row.names = "row.names")
+# Edit metadata for downstream analyses: invert the sign (-/+) for biteRateChange 
+# (more intuitive to interpret where higher values = better memory) 
+
+
+meta$biteRateChange = meta$biteRateChange*(-1)
+
+
+
+##scale variables
+
+meta$scaledThig<-scale(meta$Thigmotaxis)
+meta$scaledSpeed<-scale(meta$Speed)
+meta$scaledBiteRate<-scale(meta$biteRateChange)
+meta$scaledmetRate<-scale(meta$metabolicRate)
+names(meta)
+
+
+fit_data2 = Maaslin2(
+  input_data = KO, 
+  input_metadata = meta, 
+  output = "Maaslin2_output_KO_AllFixedTerms", 
+  fixed_effects = c("treatmentOrder", "scaledBiteRate", "scaledThig", "scaledSpeed", "scaledmetRate"),
+  random_effects = c("aquarium"),
+  reference = c("treatmentOrder,control"),
+  plot_scatter = FALSE)
+
+fit_data3 = Maaslin2(
+  input_data = PA, 
+  input_metadata = meta, 
+  output = "Maaslin2_output_PA_AllFixedTerms", 
+  fixed_effects = c("treatmentOrder", "scaledBiteRate", "scaledThig", "scaledSpeed", "scaledmetRate"),
+  random_effects = c("aquarium"),
+  reference = c("treatmentOrder,control"),
+  plot_scatter = FALSE)
+
+
+```
+
+
+```{r}
+sessionInfo()
+```
+
